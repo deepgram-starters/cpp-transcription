@@ -1,0 +1,22 @@
+# Build output
+build/
+
+# Environment
+.env
+
+# vcpkg installed packages
+vcpkg_installed/
+
+# Frontend
+frontend/node_modules/
+frontend/.vite/
+
+# Test results
+test-results/
+
+# IDE
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
