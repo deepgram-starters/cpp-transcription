@@ -406,6 +406,42 @@ static size_t curlWriteCallback(void* contents, size_t size, size_t nmemb,
 }
 
 /**
+ * Download content from a URL using libcurl. Returns the raw bytes
+ * and an error string (empty on success).
+ */
+static std::pair<std::string, std::string> downloadFromUrl(const std::string& url) {
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        return {"", "Failed to initialize HTTP client"};
+    }
+
+    std::string body;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+
+    CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        std::string error = "Failed to download from URL: " +
+                            std::string(curl_easy_strerror(res));
+        curl_easy_cleanup(curl);
+        return {"", error};
+    }
+
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    curl_easy_cleanup(curl);
+
+    if (httpCode < 200 || httpCode >= 300) {
+        return {"", "URL returned HTTP " + std::to_string(httpCode)};
+    }
+
+    return {body, ""};
+}
+
+/**
  * Send audio bytes to the Deepgram /v1/listen endpoint and return the
  * parsed JSON response. Query parameters control model selection and
  * feature flags.
@@ -653,19 +689,35 @@ int main() {
             // Parse multipart form data
             crow::multipart::message msg(req);
             std::string audioData;
+            std::string audioUrl;
 
-            // Find the "file" part
+            // Find the "file" or "url" part
             for (const auto& part : msg.parts) {
                 auto it = part.headers.find("Content-Disposition");
                 if (it != part.headers.end()) {
-                    // Check if the params map contains a "name" key with "file"
                     auto nameIt = it->second.params.find("name");
-                    if (nameIt != it->second.params.end() &&
-                        nameIt->second == "file") {
-                        audioData = part.body;
-                        break;
+                    if (nameIt != it->second.params.end()) {
+                        if (nameIt->second == "file" && !part.body.empty()) {
+                            audioData = part.body;
+                        } else if (nameIt->second == "url" && !part.body.empty()) {
+                            audioUrl = part.body;
+                        }
                     }
                 }
+            }
+
+            // If URL provided but no file, download the audio
+            if (audioData.empty() && !audioUrl.empty()) {
+                auto [downloaded, dlError] = downloadFromUrl(audioUrl);
+                if (!dlError.empty()) {
+                    json errBody = formatErrorResponse(dlError, 400, "URL_ERROR");
+                    res.code = 400;
+                    res.set_header("Content-Type", "application/json");
+                    addCorsHeaders(res);
+                    res.write(errBody.dump());
+                    return res;
+                }
+                audioData = std::move(downloaded);
             }
 
             if (audioData.empty()) {
@@ -679,7 +731,7 @@ int main() {
             }
 
             // Extract query parameters and form values
-            auto urlParams = crow::query_string("?" + req.url_params.get_query_string_raw());
+            const auto& urlParams = req.url_params;
 
             // Model parameter
             std::string model;
